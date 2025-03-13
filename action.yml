@@ -1,7 +1,7 @@
 name: Python Coverage Comment
 branding:
-  icon: "umbrella"
-  color: "purple"
+  icon: "check-circle"
+  color: "gray-dark"
 description: >
   Publish diff coverage report as PR comment, and create a coverage badge
   to display on the readme.
