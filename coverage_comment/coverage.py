@@ -21,8 +21,20 @@ class CoverageMetadata:
     show_contexts: bool
 
 
+class OutputMixin:
+    def as_output(self, prefix: str) -> dict:
+        data = dataclasses.asdict(self)
+        output = {}
+        for key, value in data.items():
+            if value is not None and not isinstance(value, dict):
+                output[f"{prefix}_{key}"] = (
+                    float(value) if isinstance(value, decimal.Decimal) else value
+                )
+        return output
+
+
 @dataclasses.dataclass(kw_only=True)
-class CoverageInfo:
+class CoverageInfo(OutputMixin):
     covered_lines: int
     num_statements: int
     percent_covered: decimal.Decimal
@@ -76,7 +88,7 @@ class FileDiffCoverage:
 
 
 @dataclasses.dataclass(kw_only=True)
-class DiffCoverage:
+class DiffCoverage(OutputMixin):
     total_num_lines: int
     total_num_violations: int
     total_percent_covered: decimal.Decimal
@@ -286,18 +298,7 @@ def get_diff_coverage_info(
     )
 
 
-def get_added_lines(
-    git: subprocess.Git, base_ref: str
-) -> dict[pathlib.Path, list[int]]:
-    # --unified=0 means we don't get any context lines for chunk, and we
-    # don't merge chunks. This means the headers that describe line number
-    # are always enough to derive what line numbers were added.
-    git.fetch("origin", base_ref, "--depth=1000")
-    diff = git.diff("--unified=0", "FETCH_HEAD", "--", ".")
-    return parse_diff_output(diff)
-
-
-def parse_diff_output(diff: str) -> dict[pathlib.Path, list[int]]:
+def get_added_lines(diff: str) -> dict[pathlib.Path, list[int]]:
     current_file: pathlib.Path | None = None
     added_filename_prefix = "+++ b/"
     result: dict[pathlib.Path, list[int]] = {}

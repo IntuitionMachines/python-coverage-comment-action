@@ -1,58 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
-import subprocess
-import uuid
 
 import pytest
 
 from coverage_comment import main
-
-
-@pytest.fixture
-def in_integration_env(integration_env, integration_dir):
-    curdir = os.getcwd()
-    os.chdir(integration_dir)
-    yield integration_dir
-    os.chdir(curdir)
-
-
-@pytest.fixture
-def integration_dir(tmp_path: pathlib.Path):
-    test_dir = tmp_path / "integration_test"
-    test_dir.mkdir()
-    return test_dir
-
-
-@pytest.fixture
-def file_path(integration_dir):
-    return integration_dir / "foo.py"
-
-
-@pytest.fixture
-def write_file(file_path):
-    def _(*variables):
-        content = "import os"
-        for i, var in enumerate(variables):
-            content += f"""\nif os.environ.get("{var}"):\n    {i}\n"""
-        file_path.write_text(content, encoding="utf8")
-
-    return _
-
-
-@pytest.fixture
-def run_coverage(file_path, integration_dir):
-    def _(*variables):
-        subprocess.check_call(
-            ["coverage", "run", "--parallel", file_path.name],
-            cwd=integration_dir,
-            env=os.environ | dict.fromkeys(variables, "1"),
-        )
-
-    return _
-
 
 DIFF_STDOUT = """diff --git a/foo.py b/foo.py
 index 6c08c94..b65c612 100644
@@ -69,53 +22,28 @@ index 6c08c94..b65c612 100644
 
 
 @pytest.fixture
-def commit(integration_dir):
-    def _():
-        subprocess.check_call(
-            ["git", "add", "."],
-            cwd=integration_dir,
-        )
-        subprocess.check_call(
-            ["git", "commit", "-m", str(uuid.uuid4())],
-            cwd=integration_dir,
-            env={
-                "GIT_AUTHOR_NAME": "foo",
-                "GIT_AUTHOR_EMAIL": "foo",
-                "GIT_COMMITTER_NAME": "foo",
-                "GIT_COMMITTER_EMAIL": "foo",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-            },
-        )
-
-    return _
-
-
-@pytest.fixture
-def integration_env(integration_dir, write_file, run_coverage, commit, request):
-    subprocess.check_call(["git", "init", "-b", "main"], cwd=integration_dir)
-    # diff coverage reads the "origin/{...}" branch so we simulate an origin remote
-    subprocess.check_call(["git", "remote", "add", "origin", "."], cwd=integration_dir)
-    write_file("A", "B")
-    commit()
-
-    add_branch_mark = request.node.get_closest_marker("add_branches")
-    for additional_branch in add_branch_mark.args if add_branch_mark else []:
-        subprocess.check_call(
-            ["git", "switch", "-c", additional_branch],
-            cwd=integration_dir,
-        )
-
-    subprocess.check_call(
-        ["git", "switch", "-c", "branch"],
-        cwd=integration_dir,
-    )
-
-    write_file("A", "B", "C", "D")
-    commit()
-
-    run_coverage("A", "C")
-    subprocess.check_call(["git", "fetch", "origin"], cwd=integration_dir)
+def payload():
+    RAW_DATA = {
+        "meta": {
+            "version": "0.0",
+            "timestamp": "2021-12-26T22:27:40.683570",
+            "branch_coverage": False,
+            "show_contexts": False,
+        },
+        "files": {},
+        "totals": {
+            "covered_lines": 3,
+            "num_statements": 10,
+            "percent_covered": 30.0,
+            "missing_lines": 7,
+            "excluded_lines": 0,
+            "num_branches": 0,
+            "num_partial_branches": 0,
+            "covered_branches": 0,
+            "missing_branches": 0,
+        },
+    }
+    return json.dumps({"coverage": 30.0, "raw_data": RAW_DATA, "coverage_path": "."})
 
 
 def test_action__invalid_event_name(session, push_config, in_integration_env, get_logs):
@@ -132,6 +60,43 @@ def test_action__invalid_event_name(session, push_config, in_integration_env, ge
 
     assert result == 1
     assert get_logs("ERROR", "This action has only been designed to work for")
+
+
+def get_expected_output(
+    comment_written: bool, reference_coverage: bool
+) -> dict[str, str]:
+    output = {
+        "activity_run": '"process_pr"',
+        "comment_file_written": str(comment_written).lower(),
+        "new_covered_lines": "7",
+        "new_num_statements": "9",
+        "new_percent_covered": "0.7777777777777778",
+        "new_missing_lines": "2",
+        "new_excluded_lines": "0",
+        "new_num_branches": "0",
+        "new_num_partial_branches": "0",
+        "new_covered_branches": "0",
+        "new_missing_branches": "0",
+        "diff_total_num_lines": "4",
+        "diff_total_num_violations": "1",
+        "diff_total_percent_covered": "0.75",
+        "diff_num_changed_lines": "6",
+    }
+    if reference_coverage:
+        output.update(
+            {
+                "reference_covered_lines": "3",
+                "reference_num_statements": "10",
+                "reference_percent_covered": "0.3",
+                "reference_missing_lines": "7",
+                "reference_excluded_lines": "0",
+                "reference_num_branches": "0",
+                "reference_num_partial_branches": "0",
+                "reference_covered_branches": "0",
+                "reference_missing_branches": "0",
+            }
+        )
+    return output
 
 
 def test_action__pull_request__store_comment(
@@ -171,8 +136,8 @@ def test_action__pull_request__store_comment(
         "POST", "/repos/py-cov-action/foobar/issues/2/comments", json=checker
     )(status_code=403)
 
-    git.register("git fetch origin main --depth=1000")()
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     result = main.action(
         config=pull_request_config(
@@ -208,9 +173,13 @@ def test_action__pull_request__store_comment(
         in comment
     )
 
-    expected_output = "COMMENT_FILE_WRITTEN=true\n"
-
-    assert output_file.read_text() == expected_output
+    output = {
+        key: value
+        for key, value in (
+            line.split("=") for line in output_file.read_text().strip().splitlines()
+        )
+    }
+    assert output == get_expected_output(comment_written=True, reference_coverage=False)
 
 
 @pytest.mark.add_branches("foo")
@@ -222,11 +191,11 @@ def test_action__pull_request__store_comment_not_targeting_default(
     summary_file,
     capsys,
     git,
+    payload,
 ):
     session.register("GET", "/repos/py-cov-action/foobar")(
         json={"default_branch": "main", "visibility": "public"}
     )
-    payload = json.dumps({"coverage": 30.00})
 
     session.register(
         "GET",
@@ -252,8 +221,8 @@ def test_action__pull_request__store_comment_not_targeting_default(
         "POST", "/repos/py-cov-action/foobar/issues/2/comments", json=checker
     )(status_code=403)
 
-    git.register("git fetch origin foo --depth=1000")(stdout=DIFF_STDOUT)
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     result = main.action(
         config=pull_request_config(
@@ -281,13 +250,18 @@ def test_action__pull_request__store_comment_not_targeting_default(
 
 
 def test_action__pull_request__post_comment(
-    pull_request_config, session, in_integration_env, output_file, summary_file, git
+    pull_request_config,
+    session,
+    in_integration_env,
+    output_file,
+    summary_file,
+    git,
+    payload,
 ):
     session.register("GET", "/repos/py-cov-action/foobar")(
         json={"default_branch": "main", "visibility": "public"}
     )
 
-    payload = json.dumps({"coverage": 30.00})
     # There is an existing badge in this test, allowing to test the coverage evolution
     session.register(
         "GET",
@@ -299,8 +273,8 @@ def test_action__pull_request__post_comment(
     # Are there already comments
     session.register("GET", "/repos/py-cov-action/foobar/issues/2/comments")(json=[])
 
-    git.register("git fetch origin main --depth=1000")()
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     comment = None
 
@@ -335,21 +309,27 @@ def test_action__pull_request__post_comment(
     assert comment.count("<img") == 10
     assert comment == summary_file.read_text()
 
-    expected_output = "COMMENT_FILE_WRITTEN=false\n"
-
-    assert output_file.read_text() == expected_output
+    output = {
+        key: value
+        for key, value in (
+            line.split("=") for line in output_file.read_text().strip().splitlines()
+        )
+    }
+    assert output == get_expected_output(comment_written=False, reference_coverage=True)
 
 
 def test_action__push__non_default_branch(
-    push_config, session, in_integration_env, output_file, summary_file, git
+    push_config, session, in_integration_env, output_file, summary_file, git, payload
 ):
     session.register("GET", "/repos/py-cov-action/foobar")(
         json={"default_branch": "main", "visibility": "public"}
     )
-    git.register("git fetch origin main --depth=1000")(stdout=DIFF_STDOUT)
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
 
-    payload = json.dumps({"coverage": 30.00})
+    # What is the diff of the `other` branch
+    session.register("GET", "/repos/py-cov-action/foobar/compare/main...other")(
+        text=DIFF_STDOUT
+    )
+
     # There is an existing badge in this test, allowing to test the coverage evolution
     session.register(
         "GET",
@@ -405,9 +385,13 @@ def test_action__push__non_default_branch(
     assert "Coverage for the whole project went from 30% to 77.77%" in comment
     assert comment == summary_file.read_text()
 
-    expected_output = "COMMENT_FILE_WRITTEN=false\n"
-
-    assert output_file.read_text() == expected_output
+    output = {
+        key: value
+        for key, value in (
+            line.split("=") for line in output_file.read_text().strip().splitlines()
+        )
+    }
+    assert output == get_expected_output(comment_written=False, reference_coverage=True)
 
 
 def test_action__push__no_branch(
@@ -430,15 +414,16 @@ def test_action__push__no_branch(
 
 
 def test_action__push__non_default_branch__no_pr(
-    push_config, session, in_integration_env, output_file, summary_file, git
+    push_config, session, in_integration_env, output_file, summary_file, git, payload
 ):
     session.register("GET", "/repos/py-cov-action/foobar")(
         json={"default_branch": "main", "visibility": "public"}
     )
-    git.register("git fetch origin main --depth=1000")(stdout=DIFF_STDOUT)
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the `other` branch
+    session.register("GET", "/repos/py-cov-action/foobar/compare/main...other")(
+        text=DIFF_STDOUT
+    )
 
-    payload = json.dumps({"coverage": 30.00})
     # There is an existing badge in this test, allowing to test the coverage evolution
     session.register(
         "GET",
@@ -480,27 +465,30 @@ def test_action__push__non_default_branch__no_pr(
 
     assert pathlib.Path("python-coverage-comment-action.txt").exists()
 
-    expected_output = "COMMENT_FILE_WRITTEN=true\n"
-
-    assert output_file.read_text() == expected_output
+    output = {
+        key: value
+        for key, value in (
+            line.split("=") for line in output_file.read_text().strip().splitlines()
+        )
+    }
+    assert output == get_expected_output(comment_written=True, reference_coverage=True)
 
 
 def test_action__pull_request__force_store_comment(
-    pull_request_config, session, in_integration_env, output_file, git
+    pull_request_config, session, in_integration_env, output_file, git, payload
 ):
     session.register("GET", "/repos/py-cov-action/foobar")(
         json={"default_branch": "main", "visibility": "public"}
     )
 
-    payload = json.dumps({"coverage": 30.00})
     # There is an existing badge in this test, allowing to test the coverage evolution
     session.register(
         "GET",
         "/repos/py-cov-action/foobar/contents/data.json",
     )(text=payload, headers={"content-type": "application/vnd.github.raw+json"})
 
-    git.register("git fetch origin main --depth=1000")()
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     result = main.action(
         config=pull_request_config(FORCE_WORKFLOW_RUN=True, GITHUB_OUTPUT=output_file),
@@ -512,9 +500,13 @@ def test_action__pull_request__force_store_comment(
 
     assert pathlib.Path("python-coverage-comment-action.txt").exists()
 
-    expected_output = "COMMENT_FILE_WRITTEN=true\n"
-
-    assert output_file.read_text() == expected_output
+    output = {
+        key: value
+        for key, value in (
+            line.split("=") for line in output_file.read_text().strip().splitlines()
+        )
+    }
+    assert output == get_expected_output(comment_written=True, reference_coverage=True)
 
 
 def test_action__pull_request__post_comment__no_marker(
@@ -530,8 +522,8 @@ def test_action__pull_request__post_comment__no_marker(
         "/repos/py-cov-action/foobar/contents/data.json",
     )(status_code=404)
 
-    git.register("git fetch origin main --depth=1000")()
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     result = main.action(
         config=pull_request_config(COMMENT_TEMPLATE="""foo"""),
@@ -555,8 +547,8 @@ def test_action__pull_request__annotations(
         "/repos/py-cov-action/foobar/contents/data.json",
     )(status_code=404)
 
-    git.register("git fetch origin main --depth=1000")()
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     # Who am I
     session.register("GET", "/user")(json={"login": "foo"})
@@ -597,8 +589,8 @@ def test_action__pull_request__post_comment__template_error(
         "/repos/py-cov-action/foobar/contents/data.json",
     )(status_code=404)
 
-    git.register("git fetch origin main --depth=1000")()
-    git.register("git diff --unified=0 FETCH_HEAD -- .")(stdout=DIFF_STDOUT)
+    # What is the diff of the PR
+    session.register("GET", "/repos/py-cov-action/foobar/pulls/2")(text=DIFF_STDOUT)
 
     result = main.action(
         config=pull_request_config(COMMENT_TEMPLATE="""{%"""),
@@ -671,6 +663,55 @@ See more details and ready-to-copy-paste-markdown at:
     assert "Name" in summary_content
     assert "Stmts" in summary_content
     assert "Missing" in summary_content
+
+
+def test_action__pull_request_closed_merged(
+    pull_request_config,
+    session,
+    in_integration_env,
+    get_logs,
+    git,
+    summary_file,
+    pull_request_event_payload,
+):
+    session.register("GET", "/repos/py-cov-action/foobar")(
+        json={"default_branch": "main", "visibility": "public"}
+    )
+    session.register(
+        "GET",
+        "https://img.shields.io/static/v1?label=Coverage&message=77%25&color=orange",
+    )(text="<this is a svg badge>")
+
+    git.register("git branch --show-current")(stdout="foo")
+    git.register("git reset --hard")()
+    git.register("git fetch origin python-coverage-comment-action-data")()
+    git.register("git switch python-coverage-comment-action-data")()
+    git.register("git add endpoint.json")()
+    git.register("git add data.json")()
+    git.register("git add badge.svg")()
+    git.register("git add htmlcov")()
+    git.register("git add README.md")()
+    git.register("git diff --staged --exit-code")(exit_code=1)
+    git.register("git commit --message Update coverage data")()
+    git.register("git push origin python-coverage-comment-action-data")()
+    git.register("git switch foo")()
+
+    pull_request_event_payload.write_text(
+        """{"action": "closed", "pull_request": {"merged": true}}"""
+    )
+
+    result = main.action(
+        config=pull_request_config(
+            GITHUB_STEP_SUMMARY=summary_file,
+            GITHUB_EVENT_PATH=pull_request_event_payload,
+        ),
+        github_session=session,
+        http_session=session,
+        git=git,
+    )
+    assert result == 0
+
+    assert get_logs("INFO", "Saving coverage files")
 
 
 def test_action__push__default_branch__private(

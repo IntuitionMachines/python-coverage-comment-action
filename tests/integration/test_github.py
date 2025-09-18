@@ -46,6 +46,27 @@ def test_get_repository_info(gh, session):
     assert info == github.RepositoryInfo(default_branch="baz", visibility="public")
 
 
+@pytest.mark.parametrize(
+    "api_url, expected",
+    [
+        ("https://api.github.com/repos/foo/bar", "https://github.com"),
+        ("https://api.github.com:8080/repos/foo/bar", "https://github.com:8080"),
+        ("https://api.github.com/repos/foo/bar/issues", "https://github.com"),
+        (
+            "https://my-ghe.company.com/api/v3/repos/foo/bar",
+            "https://my-ghe.company.com",
+        ),
+        (
+            "https://my-ghe.company.com/api/v3/repos/foo/bar/issues",
+            "https://my-ghe.company.com",
+        ),
+    ],
+)
+def test_extract_github_host(api_url, expected):
+    result = github.extract_github_host(api_url=api_url)
+    assert result == expected
+
+
 def test_download_artifact(gh, session, zip_bytes):
     artifacts = [
         {"name": "bar", "id": 456},
@@ -444,3 +465,29 @@ def test_annotations(capsys):
 ::endgroup::"""
     output = capsys.readouterr()
     assert output.err.strip() == expected
+
+
+def test_get_pr_diff(gh, session):
+    session.register(
+        "GET",
+        "/repos/foo/bar/pulls/123",
+        headers={"Accept": "application/vnd.github.v3.diff"},
+    )(text="diff --git a/foo.py b/foo.py...")
+
+    result = github.get_pr_diff(github=gh, repository="foo/bar", pr_number=123)
+
+    assert result == "diff --git a/foo.py b/foo.py..."
+
+
+def test_get_branch_diff(gh, session):
+    session.register(
+        "GET",
+        "/repos/foo/bar/compare/main...feature",
+        headers={"Accept": "application/vnd.github.v3.diff"},
+    )(text="diff --git a/foo.py b/foo.py...")
+
+    result = github.get_branch_diff(
+        github=gh, repository="foo/bar", base_branch="main", head_branch="feature"
+    )
+
+    assert result == "diff --git a/foo.py b/foo.py..."

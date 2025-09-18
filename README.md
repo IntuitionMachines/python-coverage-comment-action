@@ -215,6 +215,46 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 ```
 
+### Using with merge queues
+
+If you are using merge queues, you will need to add the `merge_group` event to your workflow's `on:` clause. This will ensure that the action is triggered when a pull request is added to the merge queue.
+
+You will need to ensure the action is run only _after_ all the actual merge checks have run. Otherwise, coverage data will be incorrectly updated.
+
+For instance
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+
+jobs:
+  test:
+    name: Run tests & display coverage
+    runs-on: ubuntu-latest
+    permissions:
+      # Gives the action the necessary permissions for publishing new
+      # comments in pull requests.
+      pull-requests: write
+      # Gives the action the necessary permissions for pushing data to the
+      # python-coverage-comment-action branch, and for editing existing
+      # comments (to avoid publishing multiple comments in the same PR)
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install everything, run the tests, produce the .coverage file
+        run: make test # This is the part where you put your own test command
+
+      - name: Coverage comment
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+```
+
 ### Merging multiple coverage reports
 
 In case you have a job matrix and you want the report to be on the global
@@ -258,10 +298,10 @@ jobs:
         run: make test # This is the part where you put your own test command
         env:
           COVERAGE_FILE: ".coverage.${{ matrix.python_version }}"
-          # Alternatively you can run coverage with the --parallel flag or add
-          # `parallel = True` in the coverage config file.
-          # If using pytest-cov, you can also add the `--cov-append` flag
-          # directly or through PYTEST_ADD_OPTS.
+          # The file name prefix must be ".coverage." for "coverage combine"
+          # enabled by "MERGE_COVERAGE_FILES: true" to work. A "subprocess"
+          # error with the message "No data to combine" will be triggered if
+          # this prefix is not used.
 
       - name: Store coverage file
         uses: actions/upload-artifact@v4
@@ -269,8 +309,10 @@ jobs:
           name: coverage-${{ matrix.python_version }}
           path: .coverage.${{ matrix.python_version }}
           # By default hidden files/folders (i.e. starting with .) are ignored.
-          # You may prefer (for security reason) not setting this and instead
-          # set COVERAGE_FILE above to not start with a `.`
+          # You may prefer (for security reasons) not setting this and instead
+          # set COVERAGE_FILE above to not start with a `.`, but you cannot
+          # use "MERGE_COVERAGE_FILES: true" later on and need to manually
+          # combine the coverage file using "pipx run coverage combine"
           include-hidden-files: true
 
   coverage:
@@ -302,6 +344,56 @@ jobs:
         with:
           name: python-coverage-comment-action
           path: python-coverage-comment-action.txt
+```
+
+### Outputs
+
+The action makes available some data for downstream processing.
+
+| Name | Description |
+| --- | --- |
+| `activity_run` | The type of activity that was run. One of `process_pr`, `post_comment`, `save_coverage_data_files`. |
+
+All the following outputs are only available when running in PR mode.
+
+| Name | Description |
+| --- | --- |
+| `comment_file_written` | A boolean indicating whether a comment file was written to `COMMENT_FILENAME` or not. |
+| `new_covered_lines` | The number of covered lines in the pull request. |
+| `new_num_statements` | The number of statements in the pull request. |
+| `new_percent_covered` | The coverage percentage of the pull request. |
+| `new_missing_lines` | The number of lines with missing coverage in the pull request. |
+| `new_excluded_lines` | The number of excluded lines in the pull request. |
+| `new_num_branches` | The number of branches in the pull request. |
+| `new_num_partial_branches` | The number of partial branches in the pull request. |
+| `new_covered_branches` | The number of covered branches in the pull request. |
+| `new_missing_branches` | The number of branches with missing coverage in the pull request. |
+| `reference_covered_lines` | The number of covered lines in the base branch. |
+| `reference_num_statements` | The number of statements in the base branch. |
+| `reference_percent_covered` | The coverage percentage of the base branch. |
+| `reference_missing_lines` | The number of lines with missing coverage in the base branch. |
+| `reference_excluded_lines` | The number of excluded lines in the base branch. |
+| `reference_num_branches` | The number of branches in the base branch. |
+| `reference_num_partial_branches` | The number of partial branches in the base branch. |
+| `reference_covered_branches` | The number of covered branches in the base branch. |
+| `reference_missing_branches` | The number of branches with missing coverage in the base branch. |
+| `diff_total_num_lines` | The total number of lines in the diff. |
+| `diff_total_num_violations` | The total number of lines with missing coverage in the diff. |
+| `diff_total_percent_covered` | The coverage percentage of the diff. |
+| `diff_num_changed_lines` | The number of changed lines in the diff. |
+
+Usage may look like this
+
+```yaml
+- name: Coverage comment
+  id: coverage_comment
+  uses: py-cov-action/python-coverage-comment-action@v3
+  with:
+    GITHUB_TOKEN: ${{ github.token }}
+
+- name: Enforce coverage
+  if: ${{ steps.coverage_comment.outputs.new_percent_covered < steps.coverage_comment.outputs.reference_percent_covered }}
+  run: echo "Coverage decreased." && exit 1
 ```
 
 ### All options
@@ -388,6 +480,35 @@ partly support a mode where the action can comment on the PR when running on
 the `push` events instead. This is most likely only useful for setups not
 accepting external PRs and you will not have the best user experience.
 If that's something you need to do, please have a look at [this issue](https://github.com/py-cov-action/python-coverage-comment-action/issues/234).
+
+### Updating the coverage information on the `pull_request/closed` event
+
+Usually, the coverage data for the repository is updated on `push` events to the default
+branch, but it can also work to do it on `pull_request/closed` events, especially if
+you require all changes to go through a pull request.
+
+In this case, your workflow's `on:` clause should look like this:
+
+```yaml
+on:
+  pull_request:
+    # opened, synchronize, reopened are the default value
+    # closed will trigger when the PR is closed (merged or not)
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  build:
+    # Optional: if you want to avoid doing the whole build on PRs closed without
+    # merging, add the following clause. Note that this action won't update the
+    # coverage data even if you don't specify this (it will raise an error instead),
+    # but it can help you avoid a useless build.
+    if: github.event.action != "closed" || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    ...
+```
+
+> [!TIP]
+> The action will also save repository coverage data on `schedule` workflows.
 
 ## Overriding the template
 
