@@ -12,7 +12,6 @@ jobs:
       github.event.pull_request.author_association != 'MEMBER'
       && (
         contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)
-        || contains(fromJson('["kieferro", "ewjoachim"]'), github.event.review.user.login)
       )
       && github.event.review.state == 'approved'
       && contains(github.event.review.body, '/e2e')
