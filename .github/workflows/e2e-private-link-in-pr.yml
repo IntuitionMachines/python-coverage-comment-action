@@ -10,6 +10,10 @@ jobs:
     if: |
       github.event.issue.pull_request
       && contains(github.event.comment.body, '/invite')
+      && (
+        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+        || contains(fromJson('["kieferro", "ewjoachim"]'), github.event.comment.user.login)
+      )
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -42,6 +46,10 @@ jobs:
     if: |
       github.event.issue.pull_request
       && contains(github.event.comment.body, '/invite')
+      && (
+        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+        || contains(fromJson('["kieferro", "ewjoachim"]'), github.event.comment.user.login)
+      )
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
