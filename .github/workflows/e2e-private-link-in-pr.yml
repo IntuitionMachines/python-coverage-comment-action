@@ -11,8 +11,7 @@ jobs:
       github.event.issue.pull_request
       && contains(github.event.comment.body, '/invite')
       && (
-        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
-        || contains(fromJson('["kieferro", "ewjoachim"]'), github.event.comment.user.login)
+        contains(fromJson('["OWNER", "MEMBER"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-latest
     strategy:
