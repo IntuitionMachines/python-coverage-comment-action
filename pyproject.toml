@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = ["coverage[toml]", "httpx[http2]", "Jinja2"]
 
+[tool.uv]
+constraint-dependencies = ["certifi>=2026.10.18"]
+
 [project.scripts]
 coverage_comment = "coverage_comment.main:main"
 
